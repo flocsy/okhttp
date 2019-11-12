@@ -1,7 +1,7 @@
 Logging Interceptor
 ===================
 
-An [OkHttp interceptor][1] which logs HTTP request and response data.
+An [OkHttp interceptor][interceptors] which logs HTTP request and response data.
 
 ```java
 HttpLoggingInterceptor logging = new HttpLoggingInterceptor();
@@ -36,20 +36,9 @@ logging.redactHeader("Cookie");
 Download
 --------
 
-Get via Maven:
-```xml
-<dependency>
-  <groupId>com.squareup.okhttp3</groupId>
-  <artifactId>logging-interceptor</artifactId>
-  <version>(insert latest version)</version>
-</dependency>
-```
-
-or via Gradle 
-```groovy
-implementation 'com.squareup.okhttp3:logging-interceptor:(insert latest version)'
+```kotlin
+implementation("com.squareup.okhttp3:logging-interceptor:4.2.1")
 ```
 
 
-
- [1]: https://github.com/square/okhttp/wiki/Interceptors
+[interceptors]: https://square.github.io/okhttp/interceptors/

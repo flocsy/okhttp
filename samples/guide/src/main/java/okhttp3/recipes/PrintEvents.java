@@ -26,6 +26,7 @@ import okhttp3.Callback;
 import okhttp3.Connection;
 import okhttp3.EventListener;
 import okhttp3.Handshake;
+import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
 import okhttp3.Request;
@@ -97,6 +98,14 @@ public final class PrintEvents {
       System.out.printf("%04d %.3f %s%n", callId, elapsedNanos / 1000000000d, name);
     }
 
+    @Override public void proxySelectStart(Call call, HttpUrl url) {
+      printEvent("proxySelectStart");
+    }
+
+    @Override public void proxySelectEnd(Call call, HttpUrl url, List<Proxy> proxies) {
+      printEvent("proxySelectEnd");
+    }
+
     @Override public void callStart(Call call) {
       printEvent("callStart");
     }
@@ -156,6 +165,10 @@ public final class PrintEvents {
       printEvent("requestBodyEnd");
     }
 
+    @Override public void requestFailed(Call call, IOException ioe) {
+      printEvent("requestFailed");
+    }
+
     @Override public void responseHeadersStart(Call call) {
       printEvent("responseHeadersStart");
     }
@@ -170,6 +183,10 @@ public final class PrintEvents {
 
     @Override public void responseBodyEnd(Call call, long byteCount) {
       printEvent("responseBodyEnd");
+    }
+
+    @Override public void responseFailed(Call call, IOException ioe) {
+      printEvent("responseFailed");
     }
 
     @Override public void callEnd(Call call) {

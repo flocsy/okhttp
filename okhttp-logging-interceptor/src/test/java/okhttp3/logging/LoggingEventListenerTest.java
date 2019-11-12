@@ -16,13 +16,11 @@
 package okhttp3.logging;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.List;
-import okhttp3.Dns;
 import okhttp3.HttpUrl;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
+import okhttp3.testing.PlatformRule;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
@@ -34,13 +32,17 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 
+import static java.util.Arrays.asList;
+import static okhttp3.Protocol.HTTP_1_1;
+import static okhttp3.Protocol.HTTP_2;
 import static okhttp3.tls.internal.TlsUtil.localhost;
-import static org.junit.Assert.assertNotNull;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.fail;
 
 public final class LoggingEventListenerTest {
   private static final MediaType PLAIN = MediaType.get("text/plain");
 
+  @Rule public final PlatformRule platform = new PlatformRule();
   @Rule public final MockWebServer server = new MockWebServer();
 
   private final HandshakeCertificates handshakeCertificates = localhost();
@@ -67,11 +69,13 @@ public final class LoggingEventListenerTest {
   public void get() throws Exception {
     server.enqueue(new MockResponse().setBody("Hello!").setHeader("Content-Type", PLAIN));
     Response response = client.newCall(request().build()).execute();
-    assertNotNull(response.body());
+    assertThat(response.body()).isNotNull();
     response.body().bytes();
 
     logRecorder
-        .assertLogMatch("callStart: Request\\{method=GET, url=" + url + ", tags=\\{\\}\\}")
+        .assertLogMatch("callStart: Request\\{method=GET, url=" + url + "\\}")
+        .assertLogMatch("proxySelectStart: " + url)
+        .assertLogMatch("proxySelectEnd: \\[DIRECT\\]")
         .assertLogMatch("dnsStart: " + url.host())
         .assertLogMatch("dnsEnd: \\[.+\\]")
         .assertLogMatch("connectStart: " + url.host() + "/.+ DIRECT")
@@ -99,10 +103,12 @@ public final class LoggingEventListenerTest {
   @Test
   public void post() throws IOException {
     server.enqueue(new MockResponse());
-    client.newCall(request().post(RequestBody.create(PLAIN, "Hello!")).build()).execute();
+    client.newCall(request().post(RequestBody.create("Hello!", PLAIN)).build()).execute();
 
     logRecorder
-        .assertLogMatch("callStart: Request\\{method=POST, url=" + url + ", tags=\\{\\}\\}")
+        .assertLogMatch("callStart: Request\\{method=POST, url=" + url + "\\}")
+        .assertLogMatch("proxySelectStart: " + url)
+        .assertLogMatch("proxySelectEnd: \\[DIRECT\\]")
         .assertLogMatch("dnsStart: " + url.host())
         .assertLogMatch("dnsEnd: \\[.+\\]")
         .assertLogMatch("connectStart: " + url.host() + "/.+ DIRECT")
@@ -136,18 +142,22 @@ public final class LoggingEventListenerTest {
 
     server.enqueue(new MockResponse());
     Response response = client.newCall(request().build()).execute();
-    assertNotNull(response.body());
+    assertThat(response.body()).isNotNull();
     response.body().bytes();
 
+    platform.assumeHttp2Support();
+
     logRecorder
-        .assertLogMatch("callStart: Request\\{method=GET, url=" + url + ", tags=\\{\\}\\}")
+        .assertLogMatch("callStart: Request\\{method=GET, url=" + url + "\\}")
+        .assertLogMatch("proxySelectStart: " + url)
+        .assertLogMatch("proxySelectEnd: \\[DIRECT\\]")
         .assertLogMatch("dnsStart: " + url.host())
         .assertLogMatch("dnsEnd: \\[.+\\]")
         .assertLogMatch("connectStart: " + url.host() + "/.+ DIRECT")
         .assertLogMatch("secureConnectStart")
         .assertLogMatch("secureConnectEnd: Handshake\\{"
-            + "tlsVersion=TLS_1_2 "
-            + "cipherSuite=TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 "
+            + "tlsVersion=TLS_1_[23] "
+            + "cipherSuite=TLS_.* "
             + "peerCertificates=\\[CN=localhost\\] "
             + "localCertificates=\\[\\]}")
         .assertLogMatch("connectEnd: h2")
@@ -171,17 +181,10 @@ public final class LoggingEventListenerTest {
 
   @Test
   public void dnsFail() throws IOException {
-    client =
-        new OkHttpClient.Builder()
-            .dns(
-                new Dns() {
-                  @Override
-                  public List<InetAddress> lookup(String hostname) throws UnknownHostException {
-                    throw new UnknownHostException("reason");
-                  }
-                })
-            .eventListenerFactory(loggingEventListenerFactory)
-            .build();
+    client = new OkHttpClient.Builder()
+        .dns(hostname -> { throw new UnknownHostException("reason"); })
+        .eventListenerFactory(loggingEventListenerFactory)
+        .build();
 
     try {
       client.newCall(request().build()).execute();
@@ -190,7 +193,9 @@ public final class LoggingEventListenerTest {
     }
 
     logRecorder
-        .assertLogMatch("callStart: Request\\{method=GET, url=" + url + ", tags=\\{\\}\\}")
+        .assertLogMatch("callStart: Request\\{method=GET, url=" + url + "\\}")
+        .assertLogMatch("proxySelectStart: " + url)
+        .assertLogMatch("proxySelectEnd: \\[DIRECT\\]")
         .assertLogMatch("dnsStart: " + url.host())
         .assertLogMatch("callFailed: java.net.UnknownHostException: reason")
         .assertNoMoreLogs();
@@ -199,6 +204,7 @@ public final class LoggingEventListenerTest {
   @Test
   public void connectFail() {
     server.useHttps(handshakeCertificates.sslSocketFactory(), false);
+    server.setProtocols(asList(HTTP_2, HTTP_1_1));
     server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.FAIL_HANDSHAKE));
     url = server.url("/");
 
@@ -209,15 +215,17 @@ public final class LoggingEventListenerTest {
     }
 
     logRecorder
-        .assertLogMatch("callStart: Request\\{method=GET, url=" + url + ", tags=\\{\\}\\}")
+        .assertLogMatch("callStart: Request\\{method=GET, url=" + url + "\\}")
+        .assertLogMatch("proxySelectStart: " + url)
+        .assertLogMatch("proxySelectEnd: \\[DIRECT\\]")
         .assertLogMatch("dnsStart: " + url.host())
         .assertLogMatch("dnsEnd: \\[.+\\]")
         .assertLogMatch("connectStart: " + url.host() + "/.+ DIRECT")
         .assertLogMatch("secureConnectStart")
         .assertLogMatch(
-            "connectFailed: null javax\\.net\\.ssl\\.SSLProtocolException: Handshake message sequence violation, 1")
+            "connectFailed: null javax\\.net\\.ssl\\.(?:SSLProtocolException|SSLHandshakeException): (?:Unexpected handshake message: client_hello|Handshake message sequence violation, 1|Read error).*")
         .assertLogMatch(
-            "callFailed: javax.net.ssl.SSLProtocolException: Handshake message sequence violation, 1")
+            "callFailed: javax\\.net\\.ssl\\.(?:SSLProtocolException|SSLHandshakeException): (?:Unexpected handshake message: client_hello|Handshake message sequence violation, 1|Read error).*")
         .assertNoMoreLogs();
   }
 
@@ -226,7 +234,7 @@ public final class LoggingEventListenerTest {
   }
 
   private static class LogRecorder extends HttpLoggingInterceptorTest.LogRecorder {
-    LogRecorder assertLogMatch(String pattern) {
+    @Override LogRecorder assertLogMatch(String pattern) {
       return (LogRecorder) super.assertLogMatch("\\[\\d+ ms] " + pattern);
     }
   }

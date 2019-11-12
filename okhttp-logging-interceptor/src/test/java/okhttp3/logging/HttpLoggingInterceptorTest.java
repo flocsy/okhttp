@@ -16,17 +16,17 @@
 package okhttp3.logging;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
+import javax.annotation.Nullable;
 import javax.net.ssl.HostnameVerifier;
-import okhttp3.Dns;
 import okhttp3.HttpUrl;
+import okhttp3.Interceptor;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
+import okhttp3.testing.PlatformRule;
 import okhttp3.Protocol;
 import okhttp3.RecordingHostnameVerifier;
 import okhttp3.Request;
@@ -40,23 +40,20 @@ import okhttp3.tls.HandshakeCertificates;
 import okio.Buffer;
 import okio.BufferedSink;
 import okio.ByteString;
-import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 
 import static okhttp3.tls.internal.TlsUtil.localhost;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.CoreMatchers.equalTo;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.junit.Assume.assumeThat;
 
 public final class HttpLoggingInterceptorTest {
   private static final MediaType PLAIN = MediaType.get("text/plain; charset=utf-8");
 
+  @Rule public final PlatformRule platform = new PlatformRule();
   @Rule public final MockWebServer server = new MockWebServer();
 
   private final HandshakeCertificates handshakeCertificates = localhost();
@@ -73,6 +70,8 @@ public final class HttpLoggingInterceptorTest {
   private final HttpLoggingInterceptor applicationInterceptor =
       new HttpLoggingInterceptor(applicationLogs);
 
+  private Interceptor extraNetworkInterceptor = null;
+
   private void setLevel(Level level) {
     networkInterceptor.setLevel(level);
     applicationInterceptor.setLevel(level);
@@ -80,6 +79,9 @@ public final class HttpLoggingInterceptorTest {
 
   @Before public void setUp() {
     client = new OkHttpClient.Builder()
+        .addNetworkInterceptor(chain -> extraNetworkInterceptor != null
+            ? extraNetworkInterceptor.intercept(chain)
+            : chain.proceed(chain.request()))
         .addNetworkInterceptor(networkInterceptor)
         .addInterceptor(applicationInterceptor)
         .sslSocketFactory(
@@ -93,11 +95,11 @@ public final class HttpLoggingInterceptorTest {
 
   @Test public void levelGetter() {
     // The default is NONE.
-    Assert.assertEquals(Level.NONE, applicationInterceptor.getLevel());
+    assertThat(applicationInterceptor.getLevel()).isEqualTo(Level.NONE);
 
     for (Level level : Level.values()) {
       applicationInterceptor.setLevel(level);
-      assertEquals(level, applicationInterceptor.getLevel());
+      assertThat(applicationInterceptor.getLevel()).isEqualTo(level);
     }
   }
 
@@ -105,14 +107,13 @@ public final class HttpLoggingInterceptorTest {
     try {
       applicationInterceptor.setLevel(null);
       fail();
-    } catch (NullPointerException expected) {
-      assertEquals("level == null. Use Level.NONE instead.", expected.getMessage());
+    } catch (IllegalArgumentException expected) {
     }
   }
 
   @Test public void setLevelShouldReturnSameInstanceOfInterceptor() {
     for (Level level : Level.values()) {
-      assertSame(applicationInterceptor, applicationInterceptor.setLevel(level));
+      assertThat(applicationInterceptor.setLevel(level)).isSameAs(applicationInterceptor);
     }
   }
 
@@ -145,7 +146,7 @@ public final class HttpLoggingInterceptorTest {
     setLevel(Level.BASIC);
 
     server.enqueue(new MockResponse());
-    client.newCall(request().post(RequestBody.create(PLAIN, "Hi?")).build()).execute();
+    client.newCall(request().post(RequestBody.create("Hi?", PLAIN)).build()).execute();
 
     applicationLogs
         .assertLogEqual("--> POST " + url + " (3-byte body)")
@@ -230,7 +231,7 @@ public final class HttpLoggingInterceptorTest {
     setLevel(Level.HEADERS);
 
     server.enqueue(new MockResponse());
-    Request request = request().post(RequestBody.create(PLAIN, "Hi?")).build();
+    Request request = request().post(RequestBody.create("Hi?", PLAIN)).build();
     Response response = client.newCall(request).execute();
     response.body().close();
 
@@ -263,7 +264,7 @@ public final class HttpLoggingInterceptorTest {
     setLevel(Level.HEADERS);
 
     server.enqueue(new MockResponse());
-    Request request = request().post(RequestBody.create(null, "Hi?")).build();
+    Request request = request().post(RequestBody.create("Hi?", null)).build();
     Response response = client.newCall(request).execute();
     response.body().close();
 
@@ -323,6 +324,45 @@ public final class HttpLoggingInterceptorTest {
         .assertLogEqual("Connection: Keep-Alive")
         .assertLogEqual("Accept-Encoding: gzip")
         .assertLogMatch("User-Agent: okhttp/.+")
+        .assertLogEqual("--> END POST")
+        .assertLogMatch("<-- 200 OK " + url + " \\(\\d+ms\\)")
+        .assertLogEqual("Content-Length: 0")
+        .assertLogEqual("<-- END HTTP")
+        .assertNoMoreLogs();
+  }
+
+  @Test public void headersPostWithHeaderOverrides() throws IOException {
+    setLevel(Level.HEADERS);
+
+    extraNetworkInterceptor = chain -> chain.proceed(chain.request()
+        .newBuilder()
+        .header("Content-Length", "2")
+        .header("Content-Type", "text/plain-ish")
+        .build());
+
+    server.enqueue(new MockResponse());
+    client.newCall(request()
+        .post(RequestBody.create("Hi?", PLAIN))
+        .build()).execute();
+
+    applicationLogs
+        .assertLogEqual("--> POST " + url)
+        .assertLogEqual("Content-Type: text/plain; charset=utf-8")
+        .assertLogEqual("Content-Length: 3")
+        .assertLogEqual("--> END POST")
+        .assertLogMatch("<-- 200 OK " + url + " \\(\\d+ms\\)")
+        .assertLogEqual("Content-Length: 0")
+        .assertLogEqual("<-- END HTTP")
+        .assertNoMoreLogs();
+
+    networkLogs
+        .assertLogEqual("--> POST " + url + " http/1.1")
+        .assertLogEqual("Host: " + host)
+        .assertLogEqual("Connection: Keep-Alive")
+        .assertLogEqual("Accept-Encoding: gzip")
+        .assertLogMatch("User-Agent: okhttp/.+")
+        .assertLogEqual("Content-Length: 2")
+        .assertLogEqual("Content-Type: text/plain-ish")
         .assertLogEqual("--> END POST")
         .assertLogMatch("<-- 200 OK " + url + " \\(\\d+ms\\)")
         .assertLogEqual("Content-Length: 0")
@@ -431,7 +471,7 @@ public final class HttpLoggingInterceptorTest {
     setLevel(Level.BODY);
 
     server.enqueue(new MockResponse());
-    Request request = request().post(RequestBody.create(PLAIN, "Hi?")).build();
+    Request request = request().post(RequestBody.create("Hi?", PLAIN)).build();
     Response response = client.newCall(request).execute();
     response.body().close();
 
@@ -547,7 +587,8 @@ public final class HttpLoggingInterceptorTest {
     Response response = client.newCall(request().build()).execute();
 
     ResponseBody responseBody = response.body();
-    assertEquals("Expected response body to be valid","Hello, Hello, Hello", responseBody.string());
+    assertThat(responseBody.string()).overridingErrorMessage(
+        "Expected response body to be valid").isEqualTo("Hello, Hello, Hello");
     responseBody.close();
 
     networkLogs
@@ -650,16 +691,6 @@ public final class HttpLoggingInterceptorTest {
         .assertNoMoreLogs();
   }
 
-  @Test public void isPlaintext() {
-    assertTrue(HttpLoggingInterceptor.isPlaintext(new Buffer()));
-    assertTrue(HttpLoggingInterceptor.isPlaintext(new Buffer().writeUtf8("abc")));
-    assertTrue(HttpLoggingInterceptor.isPlaintext(new Buffer().writeUtf8("new\r\nlines")));
-    assertTrue(HttpLoggingInterceptor.isPlaintext(new Buffer().writeUtf8("white\t space")));
-    assertTrue(HttpLoggingInterceptor.isPlaintext(new Buffer().writeByte(0x80)));
-    assertFalse(HttpLoggingInterceptor.isPlaintext(new Buffer().writeByte(0x00)));
-    assertFalse(HttpLoggingInterceptor.isPlaintext(new Buffer().writeByte(0xc0)));
-  }
-
   @Test public void responseBodyIsBinary() throws IOException {
     setLevel(Level.BODY);
     Buffer buffer = new Buffer();
@@ -705,11 +736,7 @@ public final class HttpLoggingInterceptorTest {
   @Test public void connectFail() throws IOException {
     setLevel(Level.BASIC);
     client = new OkHttpClient.Builder()
-        .dns(new Dns() {
-          @Override public List<InetAddress> lookup(String hostname) throws UnknownHostException {
-            throw new UnknownHostException("reason");
-          }
-        })
+        .dns(hostname -> { throw new UnknownHostException("reason"); })
         .addInterceptor(applicationInterceptor)
         .build();
 
@@ -803,6 +830,96 @@ public final class HttpLoggingInterceptorTest {
         .assertNoMoreLogs();
   }
 
+  @Test public void duplexRequestsAreNotLogged() throws Exception {
+    platform.assumeHttp2Support();
+
+    server.useHttps(handshakeCertificates.sslSocketFactory(), false); // HTTP/2
+    url = server.url("/");
+
+    setLevel(Level.BODY);
+
+    server.enqueue(new MockResponse()
+        .setBody("Hello response!"));
+
+    RequestBody asyncRequestBody = new RequestBody() {
+      @Override public @Nullable MediaType contentType() {
+        return null;
+      }
+
+      @Override public void writeTo(BufferedSink sink) throws IOException {
+        sink.writeUtf8("Hello request!");
+        sink.close();
+      }
+
+      @Override public boolean isDuplex() {
+        return true;
+      }
+    };
+
+    Request request = request()
+        .post(asyncRequestBody)
+        .build();
+    Response response = client.newCall(request).execute();
+    assumeThat(response.protocol(), equalTo(Protocol.HTTP_2));
+
+    assertThat(response.body().string()).isEqualTo("Hello response!");
+
+    applicationLogs
+        .assertLogEqual("--> POST " + url)
+        .assertLogEqual("--> END POST (duplex request body omitted)")
+        .assertLogMatch("<-- 200 " + url + " \\(\\d+ms\\)")
+        .assertLogEqual("content-length: 15")
+        .assertLogEqual("")
+        .assertLogEqual("Hello response!")
+        .assertLogEqual("<-- END HTTP (15-byte body)")
+        .assertNoMoreLogs();
+  }
+
+  @Test public void oneShotRequestsAreNotLogged() throws Exception {
+    url = server.url("/");
+
+    setLevel(Level.BODY);
+
+    server.enqueue(new MockResponse()
+                           .setBody("Hello response!"));
+
+    RequestBody asyncRequestBody = new RequestBody() {
+      @Override public @Nullable MediaType contentType() {
+        return null;
+      }
+
+      int counter = 0;
+      @Override public void writeTo(BufferedSink sink) throws IOException {
+        counter++;
+        assertThat(counter).isLessThanOrEqualTo(1);
+
+        sink.writeUtf8("Hello request!");
+        sink.close();
+      }
+
+      @Override public boolean isOneShot() {
+        return true;
+      }
+    };
+
+    Request request = request()
+                              .post(asyncRequestBody)
+                              .build();
+    Response response = client.newCall(request).execute();
+
+    assertThat(response.body().string()).isEqualTo("Hello response!");
+
+    applicationLogs
+            .assertLogEqual("--> POST " + url)
+            .assertLogEqual("--> END POST (one-shot body omitted)")
+            .assertLogMatch("<-- 200 OK " + url + " \\(\\d+ms\\)")
+            .assertLogEqual("Content-Length: 15")
+            .assertLogEqual("")
+            .assertLogEqual("Hello response!")
+            .assertLogEqual("<-- END HTTP (15-byte body)")
+            .assertNoMoreLogs();
+  }
+
   private Request.Builder request() {
     return new Request.Builder().url(url);
   }
@@ -812,22 +929,22 @@ public final class HttpLoggingInterceptorTest {
     private int index;
 
     LogRecorder assertLogEqual(String expected) {
-      assertTrue("No more messages found", index < logs.size());
+      assertThat(index).overridingErrorMessage("No more messages found").isLessThan(logs.size());
       String actual = logs.get(index++);
-      assertEquals(expected, actual);
+      assertThat(actual).isEqualTo(expected);
       return this;
     }
 
     LogRecorder assertLogMatch(String pattern) {
-      assertTrue("No more messages found", index < logs.size());
+      assertThat(index).overridingErrorMessage("No more messages found").isLessThan(logs.size());
       String actual = logs.get(index++);
-      assertTrue("<" + actual + "> did not match pattern <" + pattern + ">",
-          Pattern.matches(pattern, actual));
+      assertThat(actual).matches(Pattern.compile(pattern, Pattern.DOTALL));
       return this;
     }
 
     void assertNoMoreLogs() {
-      assertTrue("More messages remain: " + logs.subList(index, logs.size()), index == logs.size());
+      assertThat(logs.size()).overridingErrorMessage(
+          "More messages remain: " + logs.subList(index, logs.size())).isEqualTo(index);
     }
 
     @Override public void log(String message) {
